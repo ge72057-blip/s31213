@@ -1,0 +1,162 @@
+name: build-ffmpeg
+
+# 手动触发：GitHub 网页 -> Actions -> build-ffmpeg -> Run workflow
+on:
+  workflow_dispatch:
+    inputs:
+      ffmpeg_version:
+        description: "FFmpeg 版本（对应 GitHub 上的 tag：n + 版本号）"
+        default: "8.1.3"
+
+env:
+  FFMPEG_VERSION: ${{ inputs.ffmpeg_version || '8.1.3' }}
+
+jobs:
+  android:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 360
+    strategy:
+      fail-fast: false
+      matrix:
+        target: [android-arm64, android-x86_64]
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: 安装 NDK
+        id: ndk
+        uses: nttld/setup-ndk@v1
+        with:
+          ndk-version: r28c
+
+      - name: 安装编译工具
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y nasm yasm cmake ninja-build meson autoconf automake libtool \
+            pkg-config gettext autopoint texinfo git curl xz-utils make
+
+      - name: 恢复已编好的外部库缓存
+        uses: actions/cache@v4
+        with:
+          path: build/${{ matrix.target }}/prefix
+          key: deps-${{ matrix.target }}-${{ github.run_id }}
+          restore-keys: deps-${{ matrix.target }}-
+
+      - name: 编译
+        env:
+          ANDROID_NDK_HOME: ${{ steps.ndk.outputs.ndk-path }}
+        run: bash scripts/android-build.sh ${{ matrix.target }}
+
+      - name: 上传结果（失败了也上传，里面有日志）
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ffmpeg-${{ matrix.target }}
+          path: out/${{ matrix.target }}
+          retention-days: 30
+
+      - name: 单独上传日志（很小，不含 exe/dll，下载不会被拦）
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: logs-${{ matrix.target }}
+          path: |
+            out/${{ matrix.target }}/dep-report.txt
+            out/${{ matrix.target }}/logs
+          retention-days: 30
+
+  windows:
+    runs-on: windows-2022
+    timeout-minutes: 240
+    defaults:
+      run:
+        shell: msys2 {0}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: 安装 MSYS2 和依赖库
+        uses: msys2/setup-msys2@v2
+        with:
+          msystem: MINGW64
+          update: true
+          install: >-
+            git make diffutils curl
+            mingw-w64-x86_64-toolchain
+            mingw-w64-x86_64-nasm
+            mingw-w64-x86_64-pkgconf
+
+      - name: 安装外部库（某个包名不存在就跳过，不影响整体）
+        run: |
+          # 注意：必须装 libx264（只有库），不能装 x264（它是命令行程序，会连带装上一整套 MSYS2 自带的 ffmpeg 9.x 和 100 多个包，污染编译环境）
+          for p in meson ninja cmake \
+                   libx264 x265 libvpx dav1d opus lame libvorbis libogg freetype fribidi harfbuzz libass libwebp \
+                   zlib bzip2 xz libiconv \
+                   svt-av1 aom zimg libsoxr ffnvcodec-headers amf-headers libvpl \
+                   srt libjxl whisper.cpp lcms2 libxml2 \
+                   openjpeg2 kvazaar openh264 speex gsm; do
+            pacman -S --noconfirm --needed "mingw-w64-x86_64-$p" || echo "跳过（没有这个包）：$p"
+          done
+          # 万一环境里已经带了 MSYS2 的 ffmpeg，去掉它，避免它的头文件和库干扰我们自己编的 ffmpeg
+          pacman -Rdd --noconfirm mingw-w64-x86_64-ffmpeg || true
+
+      - name: 编译
+        run: bash scripts/windows-build.sh
+
+      - name: 上传结果（失败了也上传，里面有日志）
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ffmpeg-win-x64
+          path: out/win-x64
+          retention-days: 30
+
+      - name: 单独上传日志（很小，不含 exe/dll，下载不会被拦）
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: logs-win-x64
+          path: |
+            out/win-x64/dep-report.txt
+            out/win-x64/logs
+          retention-days: 30
+
+  ios:
+    runs-on: macos-15
+    timeout-minutes: 360
+    strategy:
+      fail-fast: false
+      matrix:
+        target: [ios-arm64, ios-sim-arm64]
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: 安装编译工具
+        run: brew install bash meson ninja cmake pkg-config autoconf automake libtool nasm gettext texinfo
+
+      - name: 恢复已编好的外部库缓存
+        uses: actions/cache@v4
+        with:
+          path: build/${{ matrix.target }}/prefix
+          key: deps-${{ matrix.target }}-${{ github.run_id }}
+          restore-keys: deps-${{ matrix.target }}-
+
+      - name: 编译
+        run: |
+          "$(brew --prefix)/bin/bash" scripts/ios-build.sh ${{ matrix.target }}
+
+      - name: 上传结果（失败了也上传，里面有日志）
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ffmpeg-${{ matrix.target }}
+          path: out/${{ matrix.target }}
+          retention-days: 30
+
+      - name: 单独上传日志（很小，不含 exe/dll，下载不会被拦）
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: logs-${{ matrix.target }}
+          path: |
+            out/${{ matrix.target }}/dep-report.txt
+            out/${{ matrix.target }}/logs
+          retention-days: 30
